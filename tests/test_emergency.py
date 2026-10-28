@@ -17,6 +17,9 @@ SHOULD_TRIGGER = [
     ("she is unconscious", "unconscious_seizure"),
     ("I want to die", "self_harm"),
     ("What should I do, my mother has chest pain", "cardiac"),
+    ("my chest feels heavy and I am sweating", "cardiac"),
+    ("my husband is not waking up", "unconscious_seizure"),
+    ("I feel like ending it all", "self_harm"),
     ("How can I help my father, he is unconscious", "unconscious_seizure"),
     ("मैं आत्महत्या के बारे में सोच रहा हूँ", "self_harm"),
 ]
@@ -29,6 +32,7 @@ SHOULD_NOT_TRIGGER = [
     "Can I stop my diabetes medicine if my sugar is normal now?",
     "डेंगू के लक्षण क्या होते हैं?",
     "What should I do after a dog bite?",
+    "What is suicide prevention?",
 ]
 
 
