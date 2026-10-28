@@ -33,4 +33,5 @@ def rag_only(question: str, retriever, k: int = 5) -> dict:
          "url": h["url"], "page": h["page"], "chunk_id": h["chunk_id"]}
         for i, h in enumerate(hits, start=1)
     ]
-    return {"system": "rag_only", "answer": answer, "sources": sources}
+    return {"system": "rag_only", "answer": answer, "sources": sources,
+            "passages": [h["text"] for h in hits]}
