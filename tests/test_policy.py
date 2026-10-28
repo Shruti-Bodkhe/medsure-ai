@@ -74,3 +74,14 @@ def test_failed_verification_abstains():
     assert final_decision(risk("low"), failed, 5, "d").action == ABSTAIN
     unchecked = report("unverified", "supported")
     assert final_decision(risk("low"), unchecked, 5, "d").action == ABSTAIN
+def test_out_of_scope_abstains_with_own_reason():
+    d = early_decision("weather today", risk("low", category="out_of_scope"))
+    assert d.action == ABSTAIN and d.reason_code == "OUT_OF_SCOPE"
+
+
+def test_specific_clarifying_question_is_used():
+    r = RiskResult("high", "medicine", True, "t", "llm",
+                   clarifying_question="Which medicine do you take?")
+    d = early_decision("q", r)
+    assert d.action == CLARIFY
+    assert "Which medicine do you take?" in d.message and "112" in d.message

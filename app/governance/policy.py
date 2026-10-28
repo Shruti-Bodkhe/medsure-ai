@@ -17,6 +17,10 @@ ABSTAIN_MSG = ("I don't have reliable information in my trusted sources to answe
                "safely. Please ask a doctor or pharmacist.")
 UNAVAILABLE_MSG = ("I can't check this safely right now. Please try again in a few "
                    "minutes, or ask a doctor or pharmacist.")
+OUT_OF_SCOPE_MSG = ("I can only help with general health information. For other "
+                    "topics, please use a different resource.")
+URGENT_NOTE = (" If this is urgent or getting worse, please see a doctor now "
+               "or call 112.")
 
 
 @dataclass
@@ -50,8 +54,11 @@ def early_decision(question: str, risk: RiskResult) -> Optional[Decision]:
         return Decision(ESCALATE, "EMERGENCY_DETECTED", text)
     if risk.level == "unknown":
         return Decision(ABSTAIN, "RISK_UNKNOWN", UNAVAILABLE_MSG)
+    if risk.category == "out_of_scope" and risk.level == "low":
+        return Decision(ABSTAIN, "OUT_OF_SCOPE", OUT_OF_SCOPE_MSG)
     if risk.needs_clarification and risk.level in ("medium", "high"):
-        return Decision(CLARIFY, "MISSING_INFO", CLARIFY_MSG)
+        ask = risk.clarifying_question or CLARIFY_MSG
+        return Decision(CLARIFY, "MISSING_INFO", ask + URGENT_NOTE)
     return None
 
 

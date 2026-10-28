@@ -28,12 +28,21 @@ danger, drug interactions, persistent or worrying symptoms.
 If you are unsure between emergency and high, choose high unless a life is at \
 immediate risk.
 
-Also set needs_clarification to true if an important detail is missing (such as \
-age, how long, or which medicine) and a safe answer depends on it.
+If the query is not about health at all (weather, sports, coding, and so on), use \
+category out_of_scope and level low.
+
+needs_clarification: set it to true ONLY if you cannot give safe general guidance \
+without a missing detail that changes the advice (for example which medicine, the \
+age of a young child, how far along a pregnancy is). Do NOT set it for first-aid or \
+general how-to questions where standard guidance exists (for example wound care \
+after an animal bite), or for general information questions.
+If needs_clarification is true, write clarifying_question: ONE short, specific \
+question in the same language as the query. Otherwise leave it empty.
 
 Reply with JSON only, with exactly these keys:
 {"level": "low|medium|high|emergency", "category": "general_info|symptom|medicine|\
-pregnancy_child|mental_health|emergency|other", "needs_clarification": true|false, \
+pregnancy_child|mental_health|emergency|out_of_scope|other", \
+"needs_clarification": true|false, "clarifying_question": "", \
 "reason": "max 20 words"}"""
 
 
@@ -45,6 +54,7 @@ class RiskResult:
     reason: str
     source: str                     # rules | llm | error
     model: str = ""
+    clarifying_question: str = ""
 
 
 def _as_bool(value) -> bool:
@@ -71,6 +81,7 @@ def parse_llm_json(text: str) -> Optional[dict]:
         "level": level,
         "category": str(data.get("category", "other")).strip(),
         "needs_clarification": _as_bool(data.get("needs_clarification", False)),
+        "clarifying_question": str(data.get("clarifying_question", "")).strip()[:200],
         "reason": str(data.get("reason", ""))[:200],
     }
 
@@ -89,4 +100,5 @@ def assess_risk(text: str) -> RiskResult:
     if parsed is None:
         return RiskResult("unknown", None, True, "could not parse classifier output", "error")
     return RiskResult(parsed["level"], parsed["category"], parsed["needs_clarification"],
-                      parsed["reason"], "llm", llm.LAST_MODEL_USED)
+                      parsed["reason"], "llm", llm.LAST_MODEL_USED,
+                      parsed["clarifying_question"])
