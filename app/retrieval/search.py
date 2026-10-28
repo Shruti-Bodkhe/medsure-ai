@@ -15,9 +15,18 @@ MODEL_NAME = "intfloat/multilingual-e5-small"
 TOKEN = re.compile(r"[A-Za-z0-9\u0900-\u097F]+")
 RRF_K = 60
 
+BM25_STOP = {
+    "how", "does", "do", "did", "what", "which", "who", "when", "where", "why",
+    "is", "are", "was", "were", "can", "could", "should", "would", "i", "my",
+    "me", "you", "the", "a", "an", "of", "to", "in", "on", "for", "and", "or",
+    "it", "this", "that", "with", "after", "if", "be", "have", "has",
+    # Hindi
+    "के", "का", "की", "है", "हैं", "में", "से", "को", "और", "पर", "क्या",
+    "होते", "होता", "होती", "करें", "कैसे", "मैं", "मेरा", "मेरी",
+}
 
 def tokenize(text: str):
-    return TOKEN.findall(text.lower())
+    return [t for t in TOKEN.findall(text.lower()) if t not in BM25_STOP]
 
 
 def load_chunks():
