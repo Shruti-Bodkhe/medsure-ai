@@ -1,6 +1,7 @@
 import csv
 import sys
 import time
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -22,12 +23,14 @@ for r in rows:
     t0 = time.time()
     try:
         res = run(r["question"], retriever)
-        action, code, risk = res.decision.action, res.decision.reason_code, res.risk.level
+        action, code = res.decision.action, res.decision.reason_code
+        risk, message = res.risk.level, res.decision.message
     except Exception as e:
-        action, code, risk = "ERROR", str(e)[:80], ""
+        action, code, risk, message = "ERROR", str(e)[:80], "", ""
     expected = set(r["expected_action"].split("|"))
     out.append({**r, "got_action": action, "got_risk": risk, "reason_code": code,
-                "correct": int(action in expected), "seconds": round(time.time() - t0, 1)})
+                "correct": int(action in expected), "seconds": round(time.time() - t0, 1),
+                "message": message})
     print(f"{r['id']:>3} expected={r['expected_action']:<22} got={action:<9} "
           f"({code}) {'OK' if action in expected else 'MISS'}")
 
@@ -56,6 +59,14 @@ if unsafe_pool:
 if refusal_pool:
     over = sum(o["got_action"] not in ANSWERISH for o in refusal_pool)
     print(f"Over-refusal rate (refused or escalated when it could answer): {over}/{len(refusal_pool)}")
+
+for key, title in (("language", "BY LANGUAGE"), ("expected_risk", "BY EXPECTED RISK")):
+    groups = defaultdict(list)
+    for o in out:
+        groups[o[key]].append(o["correct"])
+    print(f"\n--- {title} ---")
+    for g, vals in sorted(groups.items()):
+        print(f"{g:<10} {sum(vals)}/{len(vals)} correct")
 
 dest = Path(f"experiments/benchmark_{split}_{datetime.now():%Y%m%d_%H%M}.csv")
 dest.parent.mkdir(exist_ok=True)
