@@ -1,9 +1,9 @@
 ﻿.venv/
-.env
 __pycache__/
-*.pyc
-data/raw/
-data/processed/
-.vscode/
-data/audit/
-data/cache/
+.pytest_cache/
+.env
+data/medsure.db
+data/uploads/*
+experiments/*.csv
+project_dump.txt
+project_snapshot.txt

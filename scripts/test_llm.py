@@ -6,4 +6,5 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 from app.core.llm import generate
 
-print(generate("Reply with exactly one word: ready"))
+if __name__ == "__main__":
+    print(generate("Reply with exactly one word: ready"))

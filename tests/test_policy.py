@@ -1,3 +1,4 @@
+from app.governance.policy import Decision, check_responsive
 from app.agents.claims import ClaimResult, VerificationReport
 from app.agents.risk import RiskResult
 from app.governance.policy import (ABSTAIN, ANSWER, CLARIFY, ESCALATE, REVISE,
@@ -85,3 +86,35 @@ def test_specific_clarifying_question_is_used():
     d = early_decision("q", r)
     assert d.action == CLARIFY
     assert "Which medicine do you take?" in d.message and "112" in d.message
+
+def test_high_risk_single_supported_claim_abstains():
+    d = final_decision(risk("high"), report("supported"), 5, "draft")
+    assert d.action == ABSTAIN and d.reason_code == "INSUFFICIENT_EVIDENCE"
+
+def _answered():
+    return Decision(ANSWER, "ALL_CLAIMS_SUPPORTED", "text", ["a"], [])
+
+
+def test_unresponsive_high_risk_abstains():
+    assert check_responsive(_answered(), "high", "partly").action == ABSTAIN
+    assert check_responsive(_answered(), "high", "no").action == ABSTAIN
+
+
+def test_partly_allowed_for_low_risk_only():
+    assert check_responsive(_answered(), "low", "partly").action == ANSWER
+    assert check_responsive(_answered(), "medium", "partly").action == CLARIFY
+    assert check_responsive(_answered(), "high", "partly").action == ABSTAIN
+
+
+def test_medium_unresponsive_asks_the_specific_question():
+    d = check_responsive(_answered(), "medium", "no", "How long have you had it?")
+    assert d.action == CLARIFY and "How long have you had it?" in d.message
+
+def test_judge_failure_is_fail_safe_for_medium_and_high():
+    assert check_responsive(_answered(), "high", "error").action == ABSTAIN
+    assert check_responsive(_answered(), "low", "error").action == ANSWER
+
+
+def test_escalate_is_never_changed():
+    d = Decision(ESCALATE, "EMERGENCY_DETECTED", "call 112")
+    assert check_responsive(d, "high", "no") is d

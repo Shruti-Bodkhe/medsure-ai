@@ -20,7 +20,6 @@ BM25_STOP = {
     "is", "are", "was", "were", "can", "could", "should", "would", "i", "my",
     "me", "you", "the", "a", "an", "of", "to", "in", "on", "for", "and", "or",
     "it", "this", "that", "with", "after", "if", "be", "have", "has",
-    # Hindi
     "के", "का", "की", "है", "हैं", "में", "से", "को", "और", "पर", "क्या",
     "होते", "होता", "होती", "करें", "कैसे", "मैं", "मेरा", "मेरी",
 }

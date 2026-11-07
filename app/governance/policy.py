@@ -1,102 +1,117 @@
-from dataclasses import dataclass, field
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import List
 
-from app.agents.claims import ClaimResult, VerificationReport
-from app.agents.emergency import EmergencyResult, build_response, guess_lang
-from app.agents.risk import RiskResult
+# Action Constants
+ANSWER = "ANSWER"
+REVISE = "REVISE"
+CLARIFY = "CLARIFY"
+ABSTAIN = "ABSTAIN"
+ESCALATE = "ESCALATE"
 
-ANSWER, REVISE, CLARIFY, ABSTAIN, ESCALATE = (
-    "ANSWER", "REVISE", "CLARIFY", "ABSTAIN", "ESCALATE")
-
-CAUTION = ("\n\nThis is general information only, not medical advice. "
-           "Please talk to a doctor or pharmacist about your own situation.")
-CLARIFY_MSG = ("To give you safe information I need a little more detail, for example "
-               "the person's age, how long this has been going on, and any medicines "
-               "being taken. Could you tell me more?")
-ABSTAIN_MSG = ("I don't have reliable information in my trusted sources to answer this "
-               "safely. Please ask a doctor or pharmacist.")
-UNAVAILABLE_MSG = ("I can't check this safely right now. Please try again in a few "
-                   "minutes, or ask a doctor or pharmacist.")
-OUT_OF_SCOPE_MSG = ("I can only help with general health information. For other "
-                    "topics, please use a different resource.")
-URGENT_NOTE = (" If this is urgent or getting worse, please see a doctor now "
-               "or call 112.")
-
-
-@dataclass
-class PolicyConfig:
-    # share of claims allowed to be unsupported before the answer is revised
-    max_unsupported_frac: dict = field(
-        default_factory=lambda: {"low": 0.25, "medium": 0.10, "high": 0.0})
-    # supported claims needed to release a revised answer instead of abstaining
-    min_supported_after_revise: dict = field(
-        default_factory=lambda: {"low": 1, "medium": 1, "high": 2})
-
+UNAVAILABLE_MSG = "Medbase clinical search is currently unavailable. Please consult a qualified healthcare provider."
+ABSTAIN_MSG = "I cannot provide a definitive recommendation based on the current clinical literature. Please consult a qualified physician for personalized guidance."
+CAUTION = "\n\n*Note: This information is for educational purposes and does not replace professional medical diagnosis.*"
 
 @dataclass
 class Decision:
     action: str
     reason_code: str
     message: str
-    kept_claims: List[str] = field(default_factory=list)
-    dropped_claims: List[str] = field(default_factory=list)
+    kept_claims: List[str] = None
 
+@dataclass
+class PolicyConfig:
+    max_unsupported_low: float = 0.35
+    max_unsupported_med: float = 0.20
+    max_unsupported_high: float = 0.05
+    min_supported_low: int = 1
+    min_supported_med: int = 1
+    min_supported_high: int = 1
 
-def _caution(text: str, level: str) -> str:
-    return text + CAUTION if level in ("medium", "high") else text
-
-
-def early_decision(question: str, risk: RiskResult) -> Optional[Decision]:
-    """Decisions that can be made before any evidence is retrieved."""
-    if risk.level == "emergency":
-        category = "self_harm" if risk.category == "mental_health" else risk.category
-        text = build_response(EmergencyResult(True, category), guess_lang(question))
-        return Decision(ESCALATE, "EMERGENCY_DETECTED", text)
-    if risk.level == "unknown":
-        return Decision(ABSTAIN, "RISK_UNKNOWN", UNAVAILABLE_MSG)
-    if risk.category == "out_of_scope" and risk.level == "low":
-        return Decision(ABSTAIN, "OUT_OF_SCOPE", OUT_OF_SCOPE_MSG)
-    if risk.needs_clarification and risk.level in ("medium", "high"):
-        ask = risk.clarifying_question or CLARIFY_MSG
-        return Decision(CLARIFY, "MISSING_INFO", ask + URGENT_NOTE)
+def early_decision(question: str, risk_res) -> Decision:
+    """Evaluates early pre-retrieval triage decisions."""
+    if risk_res.level == "emergency" or risk_res.category in ("emergency", "self_harm"):
+        return Decision(
+            action=ESCALATE,
+            reason_code="EMERGENCY_DETECTED",
+            message=(
+                "🚨 **IMMEDIATE EMERGENCY ACTION REQUIRED**\n\n"
+                "The symptoms or situation you described indicate a potential medical emergency. "
+                "Please call **112** immediately or proceed to the nearest hospital emergency department.\n\n"
+                "If you are experiencing emotional distress or thoughts of self-harm, please call the "
+                "National Tele-Mental Health Helpline (**14416**) available 24/7."
+            )
+        )
+    
+    if risk_res.needs_clarification:
+        return Decision(
+            action=CLARIFY,
+            reason_code="MISSING_INFO",
+            message=risk_res.clarifying_question or "Could you please provide more details about your symptoms and duration?"
+        )
+        
+    if risk_res.category == "out_of_scope":
+        return Decision(
+            action=ABSTAIN,
+            reason_code="OUT_OF_SCOPE",
+            message="This query is outside the scope of clinical guidance. Please consult an appropriate professional."
+        )
+        
     return None
 
+def check_responsive(decision: Decision, risk_level: str, verdict: str, clarifying_q: str = "") -> Decision:
+    """Ensures response responsiveness based on judge verdict."""
+    if verdict == "no":
+        if risk_level in ("high", "emergency"):
+            return Decision(
+                action=ABSTAIN,
+                reason_code="NOT_RESPONSIVE",
+                message=ABSTAIN_MSG
+            )
+        return Decision(
+            action=CLARIFY,
+            reason_code="NEEDS_DETAIL",
+            message=clarifying_q or "Could you please clarify your specific symptoms?"
+        )
+    return decision
 
-def _revised_text(kept: List[ClaimResult]) -> str:
-    lines = []
-    for c in kept:
-        cite = f" [{', '.join(str(p) for p in c.passages)}]" if c.passages else ""
-        lines.append(f"- {c.text}{cite}")
-    return ("Here is what my trusted sources support:\n" + "\n".join(lines) +
-            "\n\nSome details were left out because I could not confirm them "
-            "in the sources.")
+def final_decision(risk, report, num_passages: int, draft: str, cfg: PolicyConfig) -> Decision:
+    """Computes final governance action based on claim verification and risk strata."""
+    if num_passages == 0:
+        return Decision(action=ABSTAIN, reason_code="NO_RELEVANT_EVIDENCE", message=ABSTAIN_MSG)
 
+    claims = report.claims
+    if not claims:
+        return Decision(action=ANSWER, reason_code="NO_CLAIMS_EXTRACTED", message=draft + CAUTION)
 
-def final_decision(risk: RiskResult, report: VerificationReport, n_evidence: int,
-                   draft: str, cfg: Optional[PolicyConfig] = None) -> Decision:
-    cfg = cfg or PolicyConfig()
-    level = risk.level
+    contra = [c for c in claims if c.verdict == "contradicted"]
+    unsup = [c for c in claims if c.verdict in ("not_found", "unverified")]
+    sup = [c for c in claims if c.verdict == "supported"]
 
-    if n_evidence == 0:
-        return Decision(ABSTAIN, "NO_EVIDENCE", ABSTAIN_MSG)
-    if report.error or not report.claims or any(
-            c.label == "unverified" for c in report.claims):
-        return Decision(ABSTAIN, "VERIFICATION_FAILED", UNAVAILABLE_MSG)
+    gamma = len(unsup) / len(claims) if claims else 0.0
 
-    supported = [c for c in report.claims if c.label == "supported"]
-    contradicted = [c for c in report.claims if c.label == "contradicted"]
-    unsupported = [c for c in report.claims if c.label != "supported"]
-    frac = len(unsupported) / len(report.claims)
-    kept = [c.text for c in supported]
-    dropped = [c.text for c in unsupported]
+    # Map risk to policy thresholds
+    if risk.level == "high":
+        max_unsup = cfg.max_unsupported_high
+        min_sup = cfg.min_supported_high
+    elif risk.level == "medium":
+        max_unsup = cfg.max_unsupported_med
+        min_sup = cfg.min_supported_med
+    else:
+        max_unsup = cfg.max_unsupported_low
+        min_sup = cfg.min_supported_low
 
-    if not contradicted and frac <= cfg.max_unsupported_frac[level]:
-        code = "ALL_CLAIMS_SUPPORTED" if not unsupported else "MOSTLY_SUPPORTED"
-        return Decision(ANSWER, code, _caution(draft, level), kept, dropped)
+    # Decision Logic
+    if len(contra) == 0 and gamma <= max_unsup and len(sup) >= min_sup:
+        return Decision(action=ANSWER, reason_code="ALL_CLAIMS_SUPPORTED", message=draft + CAUTION)
 
-    if len(supported) < cfg.min_supported_after_revise[level]:
-        return Decision(ABSTAIN, "INSUFFICIENT_EVIDENCE", ABSTAIN_MSG, kept, dropped)
+    if len(contra) == 0 and len(sup) >= min_sup:
+        # Revise and filter out unsupported claims
+        kept = [c.claim for c in sup]
+        revised_msg = "\n".join([f"• {c}" for c in kept]) + CAUTION
+        return Decision(action=REVISE, reason_code="REVISED_UNSUPPORTED_CLAIMS", message=revised_msg, kept_claims=kept)
 
-    code = "CONTRADICTION_REMOVED" if contradicted else "UNSUPPORTED_REMOVED"
-    return Decision(REVISE, code, _caution(_revised_text(supported), level),
-                    kept, dropped)
+    if risk.level in ("high", "emergency") or len(contra) > 0:
+        return Decision(action=ABSTAIN, reason_code="UNSUPPORTED_OR_CONTRADICTED", message=ABSTAIN_MSG)
+
+    return Decision(action=CLARIFY, reason_code="INSUFFICIENT_EVIDENCE_CLARIFY", message="Could you provide additional details regarding your symptoms?")
