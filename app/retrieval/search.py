@@ -1,3 +1,22 @@
+
+def _cloud_embed_query(query: str):
+    """Zero-RAM query embedding via HF Inference API for 512MB cloud containers."""
+    import os, json, urllib.request
+    import numpy as np
+    url = "https://router.huggingface.co/hf-inference/models/intfloat/multilingual-e5-small/pipeline/feature-extraction"
+    headers = {"Content-Type": "application/json"}
+    token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_API_KEY")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    data = json.dumps({"inputs": f"query: {query}", "options": {"wait_for_model": True}}).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=3.5) as resp:
+        arr = np.array(json.loads(resp.read().decode("utf-8")), dtype="float32")
+        if arr.ndim > 1:
+            arr = arr[0]
+        norm = np.linalg.norm(arr)
+        return (arr / norm if norm > 0 else arr).reshape(1, -1)
+
 import hashlib
 import json
 import re
@@ -6,7 +25,7 @@ from pathlib import Path
 import faiss
 import numpy as np
 from rank_bm25 import BM25Okapi
-from sentence_transformers import SentenceTransformer
+# Lazy-loaded SentenceTransformer to keep cloud RAM < 100MB
 
 CHUNKS_PATH = Path("data/processed/chunks.jsonl")
 CACHE_DIR = Path("data/processed")
@@ -40,7 +59,7 @@ class Retriever:
 
         self.bm25 = BM25Okapi([tokenize(t) for t in texts])
 
-        self.model = SentenceTransformer(MODEL_NAME)
+        self.model = (__import__('sentence_transformers').SentenceTransformer(MODEL_NAME) if __import__('os').getenv('MEDSURE_LOW_MEM', '0') != '1' else None)
         digest = hashlib.md5(CHUNKS_PATH.read_bytes()).hexdigest()[:8]
         cache = CACHE_DIR / f"embeddings_{digest}.npy"
         if cache.exists():
@@ -62,8 +81,8 @@ class Retriever:
         order = np.argsort(scores)[::-1][:k]
         return [(int(i), float(scores[i])) for i in order if scores[i] > 0]
 
-    def dense_search(self, query: str, k: int = 20):
-        q = self.model.encode(["query: " + query], normalize_embeddings=True)
+    def _dense_orig(self, query: str, k: int = 20):
+        q = (self.model.encode([f'query: {query}'], normalize_embeddings=True) if getattr(self, 'model', None) is not None else _cloud_embed_query(query))
         sims, ids = self.index.search(q.astype("float32"), k)
         return [(int(i), float(s)) for i, s in zip(ids[0], sims[0]) if i >= 0]
 
@@ -99,3 +118,11 @@ class Retriever:
                 break
 
         return filtered
+
+    def dense_search(self, query: str, k: int = 5):
+        if __import__("os").getenv("MEDSURE_LOW_MEM", "0") == "1" and getattr(self, "model", None) is None:
+            try:
+                return self._dense_orig(query, k=k)
+            except Exception:
+                return self.bm25_search(query, k=k)
+        return self._dense_orig(query, k=k)

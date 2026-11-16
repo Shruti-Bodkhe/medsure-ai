@@ -4,22 +4,22 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    git \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Install lightweight dependencies without heavy 500MB PyTorch for cloud container
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir -r requirements.txt
+RUN grep -v -E "^(torch|sentence-transformers|sentence_transformers)" requirements.txt > req_cloud.txt && \
+    pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r req_cloud.txt
 
 COPY . .
 
-RUN mkdir -p data/uploads data/audit data/index && chmod -R 777 /app
+RUN mkdir -p data/uploads data/audit data/index data/processed && chmod -R 777 /app
 
-# Enable low-memory mode on 512MB cloud containers so RAM stays ~95MB
 ENV MEDSURE_LOW_MEM=1
 ENV TOKENIZERS_PARALLELISM=false
+ENV PORT=8000
 
 EXPOSE 8000
 
