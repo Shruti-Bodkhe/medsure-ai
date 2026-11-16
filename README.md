@@ -13,7 +13,7 @@
 
 ---
 
-## 🌟 Overview
+##  Overview
 
 **MedSure AI** is an end-to-end multi-agent clinical governance framework that decouples generative LLM synthesis from deterministic and evidence-based safety verification across **English, Hindi (Devanagari), Marathi (Devanagari), and Romanized Hinglish**.
 
@@ -26,7 +26,7 @@
 
 ---
 
-## 📊 Empirical Evaluation (`MedSureBench-Clean` & `MedSureBench-300`)
+##  Empirical Evaluation (`MedSureBench-Clean` & `MedSureBench-300`)
 
 ### 1. Baseline Comparison on `MedSureBench-Clean` ($N = 150$)
 | Metric | `llm_only` (Unconstrained) | `rag_only` (Naive RAG) | **MedSure AI (Ours)** |
@@ -52,7 +52,7 @@
 
 ---
 
-## 🚀 Quickstart & Reproducibility
+##  Quickstart & Reproducibility
 
 ```bash
 # 1. Clone and activate virtual environment
