@@ -13,7 +13,7 @@ API_KEY = os.getenv("LLM_API_KEY", "")
 MODEL = os.getenv("LLM_MODEL", "")
 FALLBACKS = [m.strip() for m in os.getenv("LLM_FALLBACK_MODELS", "").split(",") if m.strip()]
 
-TIMEOUT = httpx.Timeout(connect=20.0, read=120.0, write=20.0, pool=20.0)
+TIMEOUT = httpx.Timeout(connect=20.0, read=25.0, write=20.0, pool=20.0)
 RETRIES = 2
 
 LAST_MODEL_USED = ""

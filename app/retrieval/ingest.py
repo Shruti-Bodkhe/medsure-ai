@@ -14,7 +14,7 @@ OUT = Path("data/processed/chunks.jsonl")
 LOG_OUT = Path("data/processed/dropped_chunks.jsonl")
 CHUNK_WORDS = 200
 OVERLAP = 40
-MIN_WORDS = 30
+MIN_WORDS = 20
 
 # ---- non-prose filter -------------------------------------------------------
 STOP = {
@@ -22,7 +22,7 @@ STOP = {
     "as", "by", "on", "can", "be", "or", "it", "from", "this", "which",
     "have", "has", "not", "at", "was", "were", "an",
 }
-MIN_STOP_RATIO = 0.10
+MIN_STOP_RATIO = 0.04
 JUNK_MARKERS = [
     "Feature story", "Latest publications", "WHO Academy Course",
     "Science in 5", "Disease Outbreak News", "Self-learning course",

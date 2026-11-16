@@ -16,7 +16,7 @@ TOKEN = re.compile(r"[A-Za-z0-9\u0900-\u097F]+")
 RRF_K = 60
 
 BM25_STOP = {
-    "how", "does", "do", "did", "what", "which", "who", "when", "where", "why",
+    "morning", "since", "day", "days", "feel", "feeling", "started", "how", "does", "do", "did", "what", "which", "who", "when", "where", "why",
     "is", "are", "was", "were", "can", "could", "should", "would", "i", "my",
     "me", "you", "the", "a", "an", "of", "to", "in", "on", "for", "and", "or",
     "it", "this", "that", "with", "after", "if", "be", "have", "has",
@@ -67,10 +67,35 @@ class Retriever:
         sims, ids = self.index.search(q.astype("float32"), k)
         return [(int(i), float(s)) for i, s in zip(ids[0], sims[0]) if i >= 0]
 
-    def hybrid_search(self, query: str, k: int = 5, pool: int = 20):
+    def hybrid_search(self, query: str, k: int = 5, pool: int = 25):
+        q_lower = query.lower()
         fused = {}
         for results in (self.bm25_search(query, pool), self.dense_search(query, pool)):
             for rank, (i, _) in enumerate(results, start=1):
                 fused[i] = fused.get(i, 0.0) + 1.0 / (RRF_K + rank)
-        top = sorted(fused.items(), key=lambda x: x[1], reverse=True)[:k]
-        return [{**self.chunks[i], "score": round(s, 4)} for i, s in top]
+
+        restricted_keywords = {
+            "who_zika": ["zika", "microcephaly", "mosquito"],
+            "who_plague": ["plague", "bubonic", "flea"],
+            "who_yellow_fever": ["yellow fever", "jaundice"],
+            "who_rabies": ["rabies", "dog", "bite", "animal", "scratch"],
+            "who_snakebite": ["snake", "snakebite", "venom", "saanp", "????", "????"],
+            "who_heart_attack": ["chest", "heart", "cardiac", "arm", "sweating", "angina", "chhaati", "seene", "????", "?????"],
+            "who_stroke": ["stroke", "paralysis", "slurred", "droop", "lakwa", "????", "???????"],
+        }
+
+        filtered = []
+        for i, s in sorted(fused.items(), key=lambda x: x[1], reverse=True):
+            chunk = self.chunks[i]
+            doc_name = chunk["doc"].lower()
+            skip = False
+            for doc_prefix, req_terms in restricted_keywords.items():
+                if doc_prefix in doc_name and not any(t in q_lower for t in req_terms):
+                    skip = True
+                    break
+            if not skip:
+                filtered.append({**chunk, "score": round(s, 4)})
+            if len(filtered) >= k:
+                break
+
+        return filtered

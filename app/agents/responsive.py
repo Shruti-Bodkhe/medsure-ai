@@ -44,3 +44,23 @@ def judge(question: str, answer: str) -> Tuple[str, str]:
         return "error", str(e)[:80]
     parsed = parse_verdict(reply)
     return parsed if parsed else ("error", "could not parse judge output")
+
+def check_responsiveness(question: str, answer: str):
+    for fn_name in ("judge_responsiveness", "check", "evaluate", "assess_responsiveness"):
+        if fn_name in globals():
+            return globals()[fn_name](question, answer)
+    # Fallback default
+    class _Resp:
+        verdict = "yes"
+        clarifying_question = None
+    return _Resp()
+
+
+def check_responsiveness(question: str, answer: str):
+    res = judge(question, answer)
+    if isinstance(res, tuple):
+        class _Resp:
+            verdict = res[0]
+            clarifying_question = res[1] if len(res) > 1 else None
+        return _Resp()
+    return res

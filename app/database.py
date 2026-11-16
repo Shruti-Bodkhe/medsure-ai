@@ -14,7 +14,8 @@ def get_db():
 
 
 def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+    salt = b"medsure_clinical_vault_v3_salt"
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 100_000).hex()
 
 
 def init_db():

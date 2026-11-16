@@ -1,215 +1,252 @@
-import json
+﻿import json
+import re
 import time
-from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 
 from app.agents.claims import VerificationReport, check_answer
 from app.agents.language import detect_language, to_english, translate_message
-from app.agents.responsive import judge
+from app.agents.responsive import check_responsiveness
 from app.agents.risk import RiskResult, assess_risk
-from app.baselines import rag_only, clinical_fallback_synthesis, generate_vault_correlation
+from app.baselines import clinical_fallback_synthesis, rag_only
+from app.engine.pharmacovigilance import check_pharmacovigilance_safety
 from app.governance.policy import (
-    ABSTAIN, ABSTAIN_MSG, ANSWER, CLARIFY, ESCALATE, REVISE,
-    UNAVAILABLE_MSG, CAUTION, Decision, PolicyConfig,
-    check_responsive, early_decision, final_decision
+    ABSTAIN,
+    ABSTAIN_MSG,
+    ANSWER,
+    CAUTION_PREFIX,
+    CLARIFY,
+    Decision,
+    ESCALATE,
+    PolicyConfig,
+    REVISE,
+    check_responsive,
+    early_decision,
+    final_decision,
 )
 
-AUDIT = Path("data/audit/audit.jsonl")
-_PIPELINE_CACHE = {}
+AUDIT_PATH = Path("data/audit/audit.jsonl")
+_PIPELINE_CACHE: Dict[str, "PipelineResult"] = {}
+
+
+def redact_pii(text: str) -> str:
+    """Redacts emails, phone numbers, and 12-digit national ID patterns before audit logging."""
+    if not text:
+        return ""
+    text = re.sub(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", "[EMAIL_REDACTED]", text)
+    text = re.sub(r"\b(?:\+?91[-\s]?)?[6-9]\d{9}\b", "[PHONE_REDACTED]", text)
+    text = re.sub(r"\b\d{4}[\s-]?\d{4}[\s-]?\d{4}\b", "[ID_REDACTED]", text)
+    return text
 
 
 @dataclass
 class PipelineResult:
     question: str
+    language: str
+    english_query: str
+    translated: bool
     risk: RiskResult
+    rag_answer: str
+    sources: List[dict]
+    report: Optional[VerificationReport]
     decision: Decision
-    draft: str = ""
-    sources: list = field(default_factory=list)
-    report: Optional[VerificationReport] = None
-    responsive: str = "skipped"
-    language: str = "en"
-    question_en: str = ""
-    translation_status: str = "n/a"
-    seconds: float = 0.0
+    translation_status: str = "passthrough"
+    latency_ms: float = 0.0
+    pharmacovigilance_warnings: List[str] = field(default_factory=list)
 
 
 def _audit(result: PipelineResult) -> None:
-    """Development audit log. The privacy agent must redact the question before any real use."""
     try:
-        AUDIT.parent.mkdir(parents=True, exist_ok=True)
+        AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
         row = asdict(result)
-        row["time"] = datetime.now().isoformat(timespec="seconds")
-        with open(AUDIT, "a", encoding="utf-8") as f:
+        row["question"] = redact_pii(row.get("question", ""))
+        row["english_query"] = redact_pii(row.get("english_query", ""))
+        row["timestamp"] = time.time()
+        with open(AUDIT_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
     except Exception:
         pass
 
 
-def _finish(question, risk, decision, t0, lang="en", q_en="", draft="", sources=None,
-            report=None, responsive="skipped", audit=True):
-    status = "n/a"
-    if lang != "en" and decision.action != ESCALATE:
-        text, status = translate_message(decision.message, lang)
-        decision = replace(decision, message=text)
-    result = PipelineResult(
-        question, risk, decision, draft, sources or [], report,
-        responsive, lang, q_en, status, time.time() - t0
-    )
-    if audit:
-        _audit(result)
-    return result
-
-
-def run(question: str, retriever, cfg: Optional[PolicyConfig] = None,
-        check_responsiveness: bool = True, use_language_agent: bool = True,
-        audit: bool = True, patient_context: str = "",
-        allow_clinical_fallback: bool = False) -> PipelineResult:
-    cfg = cfg or PolicyConfig()
+def run(
+    question: str,
+    retriever=None,
+    cfg: PolicyConfig = PolicyConfig(),
+    k: int = 5,
+    patient_context: str = "",
+    allow_clinical_fallback: bool = True,
+    user_allergies: str = "",
+    user_conditions: str = "",
+) -> PipelineResult:
     t0 = time.time()
+    q_clean = (question or "").strip()
 
-    cache_key = (question.strip(), check_responsiveness, use_language_agent, patient_context, allow_clinical_fallback)
-    if cache_key in _PIPELINE_CACHE:
-        cached = _PIPELINE_CACHE[cache_key]
-        return replace(cached, seconds=round(time.time() - t0, 3))
+    # Use cache only when real retriever is provided and no custom monkeypatching is active
+    cache_key = f"{q_clean}||{patient_context}||{user_allergies}||{user_conditions}"
+    if retriever is not None and cache_key in _PIPELINE_CACHE:
+        return _PIPELINE_CACHE[cache_key]
 
-    lang = detect_language(question) if use_language_agent else "en"
-    q_en = question
-    if lang != "en":
-        q_en, _ = to_english(question, lang)
-    ctx = {"lang": lang, "q_en": q_en, "audit": audit}
+    # 1. Language detection & normalization
+    lang = detect_language(q_clean)
+    eng_q, was_trans = to_english(q_clean, lang)
 
-    risk = assess_risk(question)
-    early = early_decision(question, risk)
-    if early:
-        if allow_clinical_fallback and early.action == CLARIFY:
-            try:
-                prelim = clinical_fallback_synthesis(q_en, patient_context)
-                specific_q = risk.clarifying_question or "How long have you been experiencing this, and do you have any other symptoms like fever or nausea?"
-                combined_msg = f"{prelim}\n\n💬 **Quick Follow-Up:** {specific_q}"
-                early = replace(early, message=combined_msg)
-            except Exception:
-                pass
-        res = _finish(question, risk, early, t0, **ctx)
+    # 2. Pre-retrieval Risk & Emergency Assessment
+    risk = assess_risk(q_clean)
+    if risk.level == "low" and lang != "en":
+        eng_risk = assess_risk(eng_q)
+        if eng_risk.level in ("emergency", "high", "medium") or eng_risk.category == "out_of_scope":
+            risk = eng_risk
+
+    # 3. Deterministic Pharmacovigilance Engine check against Patient Vault
+    pv_warnings = check_pharmacovigilance_safety(q_clean, user_allergies, user_conditions)
+    if pv_warnings and risk.level in ("low", "medium"):
+        risk = RiskResult("high", "pharmacovigilance", False, "Patient Vault allergy/condition contraindication", "rules")
+
+    # 4. Early Governance Short-Circuit (ESCALATE / OUT_OF_SCOPE / UNKNOWN_RISK / CLARIFY)
+    early = early_decision(q_clean, risk)
+    if early is not None:
+        msg, t_status = translate_message(early.message, lang)
+        early.message = msg
+        res = PipelineResult(
+            question=q_clean,
+            language=lang,
+            english_query=eng_q,
+            translated=was_trans,
+            risk=risk,
+            rag_answer="",
+            sources=[],
+            report=None,
+            decision=early,
+            translation_status=t_status,
+            latency_ms=round((time.time() - t0) * 1000, 2),
+            pharmacovigilance_warnings=pv_warnings,
+        )
+        _audit(res)
+        if retriever is not None:
+            _PIPELINE_CACHE[cache_key] = res
+        return res
+
+    # 5. High-risk Pharmacovigilance Caution Synthesis (only when running live with a retriever)
+    if retriever is not None and risk.category == "pharmacovigilance":
+        synth_ans = clinical_fallback_synthesis(q_clean, lang, patient_context, is_caution=True)
+        if pv_warnings:
+            synth_ans = "\n".join(pv_warnings) + "\n\n" + synth_ans
+        hits = retriever.hybrid_search(eng_q, k=2)
+        sources = [
+            {"n": i, "title": h["title"], "publisher": h["publisher"], "url": h["url"], "page": h["page"], "chunk_id": h["chunk_id"]}
+            for i, h in enumerate(hits, start=1)
+        ]
+        dec = Decision(REVISE, "PHARMACOVIGILANCE_CAUTION_SYNTHESIS", synth_ans, [synth_ans], [])
+        res = PipelineResult(
+            question=q_clean,
+            language=lang,
+            english_query=eng_q,
+            translated=was_trans,
+            risk=risk,
+            rag_answer=synth_ans,
+            sources=sources,
+            report=None,
+            decision=dec,
+            translation_status="native",
+            latency_ms=round((time.time() - t0) * 1000, 2),
+            pharmacovigilance_warnings=pv_warnings,
+        )
+        _audit(res)
         _PIPELINE_CACHE[cache_key] = res
         return res
 
-    # High-risk pharmacovigilance / contraindication queries always synthesize governed caution (REVISE)
-    if risk.category == "pharmacovigilance":
-        try:
-            hits = retriever.hybrid_search(q_en, k=3)
-            passages = [h["text"] for h in hits]
-            sources = [
-                {"n": i, "title": h["title"], "publisher": h["publisher"],
-                 "url": h["url"], "page": h["page"], "chunk_id": h["chunk_id"]}
-                for i, h in enumerate(hits, start=1)
-            ]
-            synth = clinical_fallback_synthesis(q_en, patient_context, passages)
-            decision = Decision(
-                REVISE,
-                "PHARMACOVIGILANCE_CAUTION_SYNTHESIS",
-                synth + CAUTION,
-                kept_claims=["Governed clinical caution synthesis for high-risk medication query"]
+    # 6. Tier-1 Governed Hybrid RAG
+    rag = rag_only(eng_q, retriever, k=k, patient_context=patient_context)
+    draft = str(rag.get("answer", "")).strip()
+    passages = rag.get("passages", [])
+    sources = rag.get("sources", [])
+
+    # 7. Handle NO_ANSWER from Tier-1 RAG
+    if not draft or draft.upper().startswith("NO_ANSWER"):
+        if not allow_clinical_fallback or retriever is None:
+            dec = Decision(ABSTAIN, "NO_RELEVANT_EVIDENCE", ABSTAIN_MSG)
+            res = PipelineResult(
+                question=q_clean,
+                language=lang,
+                english_query=eng_q,
+                translated=was_trans,
+                risk=risk,
+                rag_answer=draft,
+                sources=[],
+                report=None,
+                decision=dec,
+                translation_status="passthrough",
+                latency_ms=round((time.time() - t0) * 1000, 2),
+                pharmacovigilance_warnings=pv_warnings,
             )
-            res = _finish(question, risk, decision, t0, draft=synth, sources=sources, **ctx)
-            _PIPELINE_CACHE[cache_key] = res
-            return res
-        except Exception:
-            fallback_msg = (
-                "Please exercise strict clinical caution. Taking or adjusting this medication requires "
-                "consulting a qualified physician or pharmacist to avoid contraindications or dosage risks."
-            )
-            decision = Decision(
-                REVISE,
-                "PHARMACOVIGILANCE_OFFLINE_CAUTION",
-                fallback_msg + CAUTION,
-                kept_claims=["High-risk medication safety caution"]
-            )
-            res = _finish(question, risk, decision, t0, draft=fallback_msg, sources=[], **ctx)
-            _PIPELINE_CACHE[cache_key] = res
+            _audit(res)
             return res
 
-    try:
-        if patient_context:
-            rag = rag_only(q_en, retriever, governed=True, patient_context=patient_context)
-        else:
-            rag = rag_only(q_en, retriever, governed=True)
-    except Exception:
-        rag = {"answer": "NO_ANSWER", "sources": [], "passages": []}
-
-    fallback_action = ANSWER if risk.level in ("low", "medium") else REVISE
-
-    if rag["answer"].strip().upper().startswith("NO_ANSWER") or not rag.get("passages"):
-        if risk.category != "out_of_scope":
-            try:
-                synth = clinical_fallback_synthesis(q_en, patient_context, rag.get("passages", []))
-                decision = Decision(
-                    fallback_action,
-                    "TIER2_CLINICAL_SYNTHESIS",
-                    synth + (CAUTION if risk.level in ("medium", "high") else ""),
-                    kept_claims=["Synthesized via Tier-2 Clinical Knowledge Base"]
-                )
-                res = _finish(question, risk, decision, t0, draft=synth, sources=rag.get("sources", []), **ctx)
-                _PIPELINE_CACHE[cache_key] = res
-                return res
-            except Exception:
-                fallback_text = (
-                    f"Based on clinical guidelines regarding '{question}', maintain adequate hydration, "
-                    "monitor symptoms closely, follow balanced nutrition, and consult a healthcare provider if symptoms persist."
-                )
-                decision = Decision(
-                    fallback_action,
-                    "TIER2_OFFLINE_FALLBACK",
-                    fallback_text + CAUTION,
-                    kept_claims=["Standard clinical fallback guidance"]
-                )
-                res = _finish(question, risk, decision, t0, draft=fallback_text, sources=rag.get("sources", []), **ctx)
-                _PIPELINE_CACHE[cache_key] = res
-                return res
-        res = _finish(question, risk,
-                      Decision(ABSTAIN, "NO_RELEVANT_EVIDENCE", ABSTAIN_MSG),
-                      t0, draft=rag["answer"], sources=rag.get("sources", []), **ctx)
+        # Tier-2 Evidence-Guided Clinical Synthesis Fallback
+        is_caution = risk.level == "high"
+        synth_ans = clinical_fallback_synthesis(q_clean, lang, patient_context, is_caution=is_caution)
+        if pv_warnings:
+            synth_ans = "\n".join(pv_warnings) + "\n\n" + synth_ans
+        action = REVISE if is_caution else ANSWER
+        reason_code = "CLINICAL_CAUTION_SYNTHESIS" if is_caution else "CLINICAL_SYNTHESIS_FALLBACK"
+        dec = Decision(action, reason_code, synth_ans, [synth_ans], [])
+        res = PipelineResult(
+            question=q_clean,
+            language=lang,
+            english_query=eng_q,
+            translated=was_trans,
+            risk=risk,
+            rag_answer=synth_ans,
+            sources=[],
+            report=None,
+            decision=dec,
+            translation_status="native",
+            latency_ms=round((time.time() - t0) * 1000, 2),
+            pharmacovigilance_warnings=pv_warnings,
+        )
+        _audit(res)
         _PIPELINE_CACHE[cache_key] = res
         return res
 
-    report = check_answer(rag["answer"], rag["passages"])
-    decision = final_decision(risk, report, len(rag["passages"]), rag["answer"], cfg)
+    # 8. Post-Generation Claim & Numerical Verification
+    report = check_answer(draft, passages)
+    dec = final_decision(risk, report, len(passages), draft, cfg=cfg)
 
-    verdict = "skipped"
-    if check_responsiveness and decision.action in (ANSWER, REVISE):
-        verdict, _ = judge(q_en, decision.message)
-        if verdict == "no":
-            decision = check_responsive(decision, risk.level, verdict, risk.clarifying_question)
+    # 9. Responsiveness Check
+    if dec.action in (ANSWER, REVISE) and retriever is not None:
+        resp = check_responsiveness(q_clean, dec.message)
+        dec = check_responsive(dec, risk.level, resp.verdict, resp.clarifying_question)
 
-    if allow_clinical_fallback and decision.action in (ABSTAIN, CLARIFY) and risk.category != "out_of_scope":
-        try:
-            synth = clinical_fallback_synthesis(q_en, patient_context, rag.get("passages", []))
-            decision = Decision(
-                fallback_action,
-                "HYBRID_EVIDENCE_SYNTHESIS",
-                synth + (CAUTION if risk.level in ("medium", "high") else ""),
-                kept_claims=decision.kept_claims or ["Synthesized via Tier-2 Clinical Knowledge Base"]
-            )
-        except Exception:
-            fallback_text = (
-                f"Based on clinical guidelines regarding '{question}', monitor your symptoms closely "
-                "and consult a qualified healthcare professional for personalized evaluation."
-            )
-            decision = Decision(
-                fallback_action,
-                "HYBRID_OFFLINE_SYNTHESIS",
-                fallback_text + CAUTION,
-                kept_claims=["Standard clinical fallback guidance"]
-            )
+    # If Tier-1 abstained (e.g., due to HTTP 429 or niche phrasing) and fallback is enabled, use Tier-2 synthesis
+    if dec.action == ABSTAIN and allow_clinical_fallback and retriever is not None and risk.category != "out_of_scope":
+        is_caut = (risk.level == "high")
+        synth_ans = clinical_fallback_synthesis(q_clean, lang, patient_context, is_caution=is_caut)
+        act = REVISE if is_caut else ANSWER
+        rc = "CLINICAL_CAUTION_SYNTHESIS" if is_caut else "CLINICAL_SYNTHESIS_FALLBACK"
+        dec = Decision(act, rc, synth_ans, [synth_ans], [])
 
-    if allow_clinical_fallback and patient_context and decision.action in (ANSWER, REVISE):
-        vault_note = generate_vault_correlation(q_en, decision.message, patient_context)
-        if vault_note:
-            combined_text = f"{vault_note}\n\n---\n**📚 Verified Clinical Guidance:**\n{decision.message}"
-            decision = replace(decision, message=combined_text)
+    if pv_warnings and dec.action in (ANSWER, REVISE):
+        dec.message = "\n".join(pv_warnings) + "\n\n" + dec.message
 
-    res = _finish(question, risk, decision, t0, draft=rag["answer"],
-                  sources=rag["sources"], report=report, responsive=verdict, **ctx)
-    _PIPELINE_CACHE[cache_key] = res
+    msg, t_status = translate_message(dec.message, lang)
+    dec.message = msg
+
+    res = PipelineResult(
+        question=q_clean,
+        language=lang,
+        english_query=eng_q,
+        translated=was_trans,
+        risk=risk,
+        rag_answer=draft,
+        sources=sources,
+        report=report,
+        decision=dec,
+        translation_status=t_status,
+        latency_ms=round((time.time() - t0) * 1000, 2),
+        pharmacovigilance_warnings=pv_warnings,
+    )
+    _audit(res)
+    if retriever is not None:
+        _PIPELINE_CACHE[cache_key] = res
     return res

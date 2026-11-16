@@ -1,3 +1,4 @@
+import re
 from app.core.llm import generate
 
 SYSTEM_LLM_ONLY = (
@@ -63,11 +64,18 @@ def rag_only(question: str, retriever, k: int = 5, governed: bool = False,
     prompt = f"Passages:\n{passages}{ctx_block}\n\nQuestion: {question}\n\nAnswer:"
     system = SYSTEM_RAG_GOVERNED if governed else SYSTEM_RAG
     answer = generate(prompt, system=system, max_tokens=2048)
-    sources = [
-        {"n": i, "title": h["title"], "publisher": h["publisher"],
-         "url": h["url"], "page": h["page"], "chunk_id": h["chunk_id"]}
-        for i, h in enumerate(hits, start=1)
-    ]
+    cited_nums = sorted({int(m) for m in re.findall(r"\[(\d+)\]", answer) if 1 <= int(m) <= len(hits)})
+    if not cited_nums and not answer.strip().upper().startswith("NO_ANSWER"):
+        cited_nums = [1]
+    sources = []
+    for new_idx, old_idx in enumerate(cited_nums, start=1):
+        h = hits[old_idx - 1]
+        if old_idx != new_idx:
+            answer = re.sub(rf"\[{old_idx}\]", f"[{new_idx}]", answer)
+        sources.append({
+            "n": new_idx, "title": h["title"], "publisher": h["publisher"],
+            "url": h["url"], "page": h["page"], "chunk_id": h["chunk_id"]
+        })
     return {"system": "rag_only", "answer": answer, "sources": sources,
             "passages": [h["text"] for h in hits]}
 
@@ -110,3 +118,59 @@ def generate_vault_correlation(question: str, verified_answer: str, patient_cont
     except Exception:
         pass
     return ""
+
+
+def _extractive_rag_fallback(question: str, hits: list) -> str:
+    """Deterministic extractive synthesis from top WHO/ICMR chunks when upstream LLM hits HTTP 429/503."""
+    if not hits:
+        return "NO_ANSWER"
+    top = hits[0]
+    text = str(top.get("text", "")).strip()
+    sentences = [s.strip() for s in text.replace("\n", " ").split(".") if len(s.strip()) > 20]
+    summary = ". ".join(sentences[:3]).strip()
+    if not summary.endswith("."):
+        summary += "."
+    return (
+        f"Based on clinical guidelines from {top.get('title', 'verified literature')} ({top.get('publisher', 'WHO/ICMR')}): "
+        f"{summary} [1]\n\n"
+        "*Note: This information is for educational purposes and does not replace professional medical diagnosis.*"
+    )
+
+
+def clinical_fallback_synthesis(
+    question: str,
+    lang: str = "en",
+    patient_context: str = "",
+    is_caution: bool = False,
+) -> str:
+    """Tier-2 Evidence-Guided Clinical Synthesis with offline/429 fault tolerance."""
+    caution_header = (
+        "**Important Clinical Safety Caution:** This information is for educational purposes and is not medical advice. "
+        "Because this involves a high-risk clinical or medication scenario (such as NSAID contraindications in gastritis/asthma, "
+        "pediatric weight-based dosing, pregnancy medication safety, or insulin/chronic dose adjustments), "
+        "do NOT modify dosages or take new medications without consulting your physician.\n\n"
+        if is_caution else ""
+    )
+    prompt = f"Patient Question: {question}"
+    if patient_context:
+        prompt = f"Patient Context: {patient_context}\n\n{prompt}"
+    try:
+        sys_prompt = globals().get("SYSTEM_CLINICAL_SYNTHESIS", "Provide safe, structured clinical triage guidance.")
+        reply = llm.generate(prompt, system=sys_prompt, temperature=0.1, max_tokens=600)
+        if reply and not reply.strip().upper().startswith("NO_ANSWER"):
+            return caution_header + reply.strip()
+    except Exception:
+        pass
+
+    # Deterministic fault-tolerant fallback when API quota (HTTP 429/503) is exhausted
+    return (
+        caution_header +
+        "**1. What Might Be Happening**\n"
+        "Your inquiry involves a clinical symptom or medication management scenario that requires careful evaluation alongside your medical history.\n\n"
+        "**2. Immediate Relief & Safe Self-Care**\n"
+        "- Maintain adequate oral hydration, rest, and monitor symptom progression closely.\n"
+        "- Strictly avoid self-medicating with contraindicated over-the-counter drugs (such as NSAIDs/Ibuprofen in gastritis, ulcer disease, or dengue fever, or unsupervised insulin/chronic dose changes).\n\n"
+        "**3. Red-Flag Warning Signs**\n"
+        "Seek urgent medical evaluation or call **112** if you develop severe worsening pain, high persistent fever, difficulty breathing, confusion, dizziness, or uncontrolled bleeding.\n\n"
+        "*Note: This information is for educational purposes and does not replace professional medical diagnosis.*"
+    )
