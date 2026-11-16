@@ -1,5 +1,5 @@
 ﻿@'
-# 🏥 MedSure AI: Multi-Agent Clinical Governance Framework for Multilingual Healthcare Triage
+#  MedSure AI: Multi-Agent Clinical Governance Framework for Multilingual Healthcare Triage
 
 [![Tests](https://img.shields.io/badge/pytest-75%2F75%20passing-brightgreen)](tests/)
 [![Corpus](https://img.shields.io/badge/WHO%20%2B%20ICMR%20Corpus-211%20Guidelines%20(2%2C148%20Chunks)-blue)](data/sources.csv)
